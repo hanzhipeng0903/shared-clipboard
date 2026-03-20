@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>共享剪贴板</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, sans-serif; background: #f5f5f5; min-height: 100vh; }
+  .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+  h1 { text-align: center; margin: 20px 0; color: #333; font-size: 24px; }
+  .section { background: #fff; border-radius: 12px; padding: 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 20px; }
+  .section label { font-size: 14px; color: #666; margin-bottom: 8px; display: block; }
+  .row { display: flex; gap: 10px; }
+  input, textarea { border: 1px solid #ddd; border-radius: 8px; padding: 10px 14px; font-size: 16px; width: 100%; outline: none; }
+  input:focus, textarea:focus { border-color: #4a90d9; }
+  textarea { resize: vertical; min-height: 80px; }
+  button { background: #4a90d9; color: #fff; border: none; border-radius: 8px; padding: 10px 20px; font-size: 16px; cursor: pointer; white-space: nowrap; }
+  button:hover { background: #357abd; }
+  button:active { transform: scale(0.98); }
+  .btn-sm { background: #e74c3c; padding: 4px 12px; font-size: 13px; }
+  .btn-sm:hover { background: #c0392b; }
+  .btn-refresh { background: #27ae60; }
+  .btn-refresh:hover { background: #219a52; }
+  .btn-copy { background: #8e44ad; padding: 4px 12px; font-size: 13px; }
+  .btn-copy:hover { background: #7d3c98; }
+  .items { margin-top: 16px; }
+  .item { background: #fff; border-radius: 8px; padding: 14px; margin-bottom: 10px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
+  .item-header { display: flex; justify-content: space-between; align-items: center; }
+  .item-text { word-break: break-all; white-space: pre-wrap; font-size: 15px; margin-bottom: 6px; }
+  .item-time { font-size: 12px; color: #999; }
+  .item-btns { display: flex; gap: 6px; }
+  .empty { text-align: center; color: #999; padding: 40px 0; }
+  #room-display { display: none; }
+  .actions { display: flex; gap: 10px; margin-top: 12px; }
+  .actions button { flex: 1; }
+  .toast { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); background: #333; color: #fff; padding: 8px 20px; border-radius: 8px; font-size: 14px; display: none; z-index: 100; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>&#128203; 共享剪贴板</h1>
+
+  <div id="room-entry" class="section">
+    <label>输入房间码，相同房间码的设备共享数据</label>
+    <div class="row">
+      <input id="room-input" placeholder="输入房间码，如: myroom" maxlength="50">
+      <button onclick="joinRoom()">进入</button>
+    </div>
+  </div>
+
+  <div id="room-display" class="section">
+    <label>当前房间: <strong id="room-name"></strong></label>
+    <textarea id="text-input" placeholder="输入要共享的文本..."></textarea>
+    <div class="actions">
+      <button onclick="addItem()">发送</button>
+      <button class="btn-refresh" onclick="loadItems()">刷新</button>
+      <button class="btn-sm" onclick="exitRoom()">退出房间</button>
+    </div>
+  </div>
+
+  <div id="items" class="items"></div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+// ===== 在这里填入你的 Supabase 配置 =====
+const SUPABASE_URL = 'https://nmmqgeufpjwhouskelbi.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_mESALdgW3rKELtyRVHMkKA_xdk5aKn4';
+// ==========================================
+
+const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+let roomId = '';
+let subscription = null;
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.display = 'block';
+  setTimeout(() => t.style.display = 'none', 1500);
+}
+
+function joinRoom() {
+  const id = document.getElementById('room-input').value.trim();
+  if (!id) return alert('请输入房间码');
+  roomId = id;
+  document.getElementById('room-entry').style.display = 'none';
+  document.getElementById('room-display').style.display = 'block';
+  document.getElementById('room-name').textContent = roomId;
+  loadItems();
+  subscribeRoom();
+}
+
+function exitRoom() {
+  if (subscription) { supabase.removeChannel(subscription); subscription = null; }
+  roomId = '';
+  document.getElementById('room-entry').style.display = 'block';
+  document.getElementById('room-display').style.display = 'none';
+  document.getElementById('items').innerHTML = '';
+}
+
+function subscribeRoom() {
+  subscription = supabase
+    .channel('room-' + roomId)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'messages', filter: 'room_id=eq.' + roomId }, () => {
+      loadItems();
+    })
+    .subscribe();
+}
+
+async function loadItems() {
+  const { data, error } = await supabase
+    .from('messages')
+    .select('*')
+    .eq('room_id', roomId)
+    .order('created_at', { ascending: false });
+
+  const el = document.getElementById('items');
+  if (error) { el.innerHTML = '<div class="empty">加载失败: ' + escapeHtml(error.message) + '</div>'; return; }
+  if (!data.length) { el.innerHTML = '<div class="empty">暂无内容，发送点什么吧</div>'; return; }
+
+  el.innerHTML = data.map(i => `
+    <div class="item">
+      <div class="item-text">${escapeHtml(i.text)}</div>
+      <div class="item-header">
+        <span class="item-time">${new Date(i.created_at).toLocaleString('zh-CN')}</span>
+        <div class="item-btns">
+          <button class="btn-copy" onclick="copyText('${i.id}')">复制</button>
+          <button class="btn-sm" onclick="deleteItem(${i.id})">删除</button>
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function addItem() {
+  const input = document.getElementById('text-input');
+  const text = input.value.trim();
+  if (!text) return;
+  await supabase.from('messages').insert({ room_id: roomId, text });
+  input.value = '';
+  loadItems();
+}
+
+async function deleteItem(id) {
+  await supabase.from('messages').delete().eq('id', id);
+  loadItems();
+}
+
+function copyText(id) {
+  const items = document.querySelectorAll('.item');
+  for (const item of items) {
+    const btn = item.querySelector('.btn-copy');
+    if (btn && btn.getAttribute('onclick').includes(id)) {
+      const text = item.querySelector('.item-text').textContent;
+      navigator.clipboard.writeText(text).then(() => showToast('已复制'));
+      return;
+    }
+  }
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+document.getElementById('room-input').addEventListener('keydown', e => { if (e.key === 'Enter') joinRoom(); });
+document.getElementById('text-input').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); addItem(); } });
+</script>
+</body>
+</html>
